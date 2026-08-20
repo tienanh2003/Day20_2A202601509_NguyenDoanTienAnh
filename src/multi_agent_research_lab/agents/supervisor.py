@@ -15,9 +15,10 @@ class SupervisorAgent(BaseAgent):
 
     Routing logic:
     1. If no sources → route to researcher
-    2. If no analysis_notes → route to analyst
+    2. If no analysis_notes → route to analyst (after researcher)
     3. If no final_answer → route to writer
-    4. Otherwise → done
+    4. If critic enabled and has answer → route to critic
+    5. Otherwise → done
     """
 
     name = "supervisor"
@@ -26,6 +27,7 @@ class SupervisorAgent(BaseAgent):
         """Update `state.route_history` with the next route."""
         settings = get_settings()
         max_iter = settings.max_iterations
+        enable_critic = getattr(settings, "enable_critic", True)
 
         # Enforce max iterations
         if state.iteration >= max_iter:
@@ -48,6 +50,9 @@ class SupervisorAgent(BaseAgent):
             next_route = AgentName.ANALYST
         elif not state.final_answer:
             next_route = AgentName.WRITER
+        elif enable_critic and not self._has_critic_review(state):
+            # Optional: route to critic for review
+            next_route = AgentName.CRITIC
         else:
             next_route = "done"
 
@@ -69,3 +74,10 @@ class SupervisorAgent(BaseAgent):
             f"[Iter {state.iteration}] Supervisor routing to: {next_route}"
         )
         return state
+
+    def _has_critic_review(self, state: ResearchState) -> bool:
+        """Check if critic has already reviewed."""
+        for result in state.agent_results:
+            if result.agent == AgentName.CRITIC:
+                return True
+        return False

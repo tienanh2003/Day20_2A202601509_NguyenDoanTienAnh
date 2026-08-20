@@ -6,9 +6,11 @@ from typing import Any, Literal
 from langgraph.graph import END, StateGraph
 
 from multi_agent_research_lab.agents.analyst import AnalystAgent
+from multi_agent_research_lab.agents.critic import CriticAgent
 from multi_agent_research_lab.agents.researcher import ResearcherAgent
 from multi_agent_research_lab.agents.supervisor import SupervisorAgent
 from multi_agent_research_lab.agents.writer import WriterAgent
+from multi_agent_research_lab.core.config import get_settings
 from multi_agent_research_lab.core.schemas import AgentName
 from multi_agent_research_lab.core.state import ResearchState
 from multi_agent_research_lab.observability.tracing import trace_span
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _route_decision(state: ResearchState) -> Literal[
-    "researcher", "analyst", "writer", "done"
+    "researcher", "analyst", "writer", "critic", "done"
 ]:
     """Route based on current state after supervisor decision."""
     history = state.route_history
@@ -29,22 +31,14 @@ def _route_decision(state: ResearchState) -> Literal[
         return "done"
 
     # Map AgentName to node names
-    mapping = {
+    mapping: dict[str, str] = {
         AgentName.RESEARCHER: "researcher",
         AgentName.ANALYST: "analyst",
         AgentName.WRITER: "writer",
+        AgentName.CRITIC: "critic",
+        "critic": "critic",
     }
-    return mapping.get(last_route, last_route)  # type: ignore[return-value]
-
-
-def _should_continue(state: ResearchState) -> Literal["supervisor", "__end__"]:
-    """Check if workflow should continue or end."""
-    if not state.route_history:
-        return "__end__"
-    last = state.route_history[-1]
-    if last == "done":
-        return "__end__"
-    return "supervisor"
+    return mapping.get(last_route, last_route)
 
 
 def _build_graph() -> StateGraph:
@@ -56,6 +50,7 @@ def _build_graph() -> StateGraph:
     graph.add_node("researcher", _researcher_node)
     graph.add_node("analyst", _analyst_node)
     graph.add_node("writer", _writer_node)
+    graph.add_node("critic", _critic_node)
 
     # Entry point
     graph.set_entry_point("supervisor")
@@ -68,6 +63,7 @@ def _build_graph() -> StateGraph:
             "researcher": "researcher",
             "analyst": "analyst",
             "writer": "writer",
+            "critic": "critic",
             "done": END,
         },
     )
@@ -76,6 +72,7 @@ def _build_graph() -> StateGraph:
     graph.add_edge("researcher", "supervisor")
     graph.add_edge("analyst", "supervisor")
     graph.add_edge("writer", "supervisor")
+    graph.add_edge("critic", "supervisor")
 
     return graph
 
@@ -100,14 +97,20 @@ def _writer_node(state: ResearchState) -> dict[str, Any]:
     return agent.run(state).model_dump()
 
 
+def _critic_node(state: ResearchState) -> dict[str, Any]:
+    agent = CriticAgent()
+    return agent.run(state).model_dump()
+
+
 class MultiAgentWorkflow:
     """Builds and runs the multi-agent graph.
 
     Keep orchestration here; keep agent internals in `agents/`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enable_critic: bool = True):
         self._graph: StateGraph[ResearchState] | None = None
+        self.enable_critic = enable_critic
 
     def build(self) -> StateGraph[ResearchState]:
         """Create a LangGraph graph."""

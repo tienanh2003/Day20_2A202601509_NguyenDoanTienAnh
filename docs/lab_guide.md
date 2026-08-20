@@ -109,9 +109,72 @@ Cách khắc phục (chọn 1 trong 3):
    export SSL_CERT_FILE=$(python -m certifi)
    ```
 
+## Running Benchmark
+
+Chạy benchmark để so sánh baseline vs multi-agent:
+
+```bash
+# Cài đặt dependencies
+pip install -e ".[dev,llm]"
+
+# Chạy baseline
+make run-baseline
+
+# Chạy multi-agent
+make run-multi
+```
+
+Để chạy benchmark tự động với nhiều queries, tạo file `scripts/run_benchmark.py`:
+
+```python
+from multi_agent_research_lab.evaluation.benchmark import run_comparative_benchmark
+from multi_agent_research_lab.evaluation.report import render_comparison_report
+from multi_agent_research_lab.cli import baseline, multi_agent
+
+queries = [
+    "Research GraphRAG state-of-the-art",
+    "Compare single-agent and multi-agent workflows",
+    "Summarize production guardrails for LLM agents"
+]
+
+results = run_comparative_benchmark(queries, baseline, multi_agent)
+report = render_comparison_report(
+    [m for _, m in results["baseline"]],
+    [m for _, m in results["multi_agent"]]
+)
+print(report)
+```
+
 ## Exit ticket
 
-Mỗi nhóm trả lời 2 câu:
+### 1. Case nào nên dùng multi-agent? Vì sao?
 
-1. Case nào nên dùng multi-agent? Vì sao?
-2. Case nào không nên dùng multi-agent? Vì sao?
+**Nên dùng multi-agent khi:**
+
+- **Chất lượng câu trả lời quan trọng** — Phân chia task cho nhiều agents chuyên biệt (researcher tìm kiếm, analyst phân tích, writer viết) cho ra kết quả tốt hơn single agent làm tất cả.
+
+- **Cần citations/nguồn đáng tin cậy** — Multi-agent có workflow rõ ràng để thu thập và đánh giá nguồn, đảm bảo trích dẫn chính xác.
+
+- **Cần debug được** — State được chia sẻ qua lại giữa các agents, dễ trace xem agent nào làm gì, lỗi ở đâu.
+
+- **Task phức tạp, nhiều bước** — Khi cần research → analyze → write, multi-agent tách bạch rõ ràng, dễ maintain.
+
+- **Production system cần mở rộng** — Thêm agent mới (critic, validator) không cần sửa agent cũ.
+
+### 2. Case nào không nên dùng multi-agent? Vì sao?
+
+**Không nên dùng multi-agent khi:**
+
+- **Query đơn giản, chỉ cần factual answer** — "Thời tiết hôm nay thế nào?" → single agent nhanh hơn, multi-agent chỉ thêm overhead.
+
+- **Tốc độ là ưu tiên #1** — Multi-agent gọi nhiều LLM calls hơn → latency cao hơn 3-5 lần.
+
+- **Chi phí phải thấp** — Mỗi agent call tốn thêm tokens và API costs. Simple query không justify được chi phí.
+
+- **Prototype nhanh** — Khi chỉ cần test ý tưởng, single agent với system prompt đủ dùng.
+
+- **Infrastructure hạn chế** — Multi-agent cần quản lý state phức tạp hơn, nhiều điểm failure hơn.
+
+- **Task có đầu ra cần nhất quán** — Pipeline dài tăng cơ hội output không deterministic.
+
+**Tóm lại:** Multi-agent là trade-off giữa quality/debuggability và speed/cost. Chọn dựa trên requirements cụ thể của bài toán.

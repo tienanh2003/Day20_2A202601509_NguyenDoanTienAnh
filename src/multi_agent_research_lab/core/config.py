@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     max_iterations: int = Field(default=6, ge=1, le=20, validation_alias="MAX_ITERATIONS")
     timeout_seconds: int = Field(default=60, ge=5, le=600, validation_alias="TIMEOUT_SECONDS")
+    enable_critic: bool = Field(default=True, validation_alias="ENABLE_CRITIC")
 
 
 @lru_cache(maxsize=1)
