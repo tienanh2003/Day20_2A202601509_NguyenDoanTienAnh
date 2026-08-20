@@ -1,6 +1,7 @@
 """LangGraph workflow skeleton."""
 
 import logging
+import os
 from typing import Any, Literal
 
 from langgraph.graph import END, StateGraph
@@ -10,7 +11,6 @@ from multi_agent_research_lab.agents.critic import CriticAgent
 from multi_agent_research_lab.agents.researcher import ResearcherAgent
 from multi_agent_research_lab.agents.supervisor import SupervisorAgent
 from multi_agent_research_lab.agents.writer import WriterAgent
-from multi_agent_research_lab.core.config import get_settings
 from multi_agent_research_lab.core.schemas import AgentName
 from multi_agent_research_lab.core.state import ResearchState
 from multi_agent_research_lab.observability.tracing import trace_span
@@ -41,38 +41,57 @@ def _route_decision(state: ResearchState) -> Literal[
     return mapping.get(last_route, last_route)
 
 
-def _build_graph() -> StateGraph:
-    """Build the LangGraph state machine."""
+def _build_graph(enable_critic: bool = True) -> StateGraph:
+    """Build the LangGraph state machine.
+
+    Args:
+        enable_critic: Whether to include critic node in workflow
+    """
     graph = StateGraph(ResearchState)
 
-    # Add nodes
+    # Add required nodes
     graph.add_node("supervisor", _supervisor_node)
     graph.add_node("researcher", _researcher_node)
     graph.add_node("analyst", _analyst_node)
     graph.add_node("writer", _writer_node)
-    graph.add_node("critic", _critic_node)
+
+    # Add critic node only if enabled
+    if enable_critic:
+        graph.add_node("critic", _critic_node)
 
     # Entry point
     graph.set_entry_point("supervisor")
 
+    # Build edges based on critic setting
+    edges = {
+        "researcher": "supervisor",
+        "analyst": "supervisor",
+        "writer": "supervisor",
+    }
+
+    if enable_critic:
+        edges["critic"] = "supervisor"
+
     # Conditional edges from supervisor
+    routes = {
+        "researcher": "researcher",
+        "analyst": "analyst",
+        "writer": "writer",
+        "done": END,
+    }
+
+    if enable_critic:
+        routes["critic"] = "critic"
+
     graph.add_conditional_edges(
         "supervisor",
         _route_decision,
-        {
-            "researcher": "researcher",
-            "analyst": "analyst",
-            "writer": "writer",
-            "critic": "critic",
-            "done": END,
-        },
+        routes,
     )
 
     # All worker nodes return to supervisor
-    graph.add_edge("researcher", "supervisor")
-    graph.add_edge("analyst", "supervisor")
-    graph.add_edge("writer", "supervisor")
-    graph.add_edge("critic", "supervisor")
+    for node, _ in edges.items():
+        graph.add_edge(node, "supervisor")
 
     return graph
 
@@ -106,15 +125,21 @@ class MultiAgentWorkflow:
     """Builds and runs the multi-agent graph.
 
     Keep orchestration here; keep agent internals in `agents/`.
+
+    Args:
+        enable_critic: Whether to include critic agent in workflow (default: True)
     """
 
     def __init__(self, enable_critic: bool = True):
         self._graph: StateGraph[ResearchState] | None = None
         self.enable_critic = enable_critic
 
+        # Set environment variable for supervisor to read
+        os.environ["ENABLE_CRITIC"] = "true" if enable_critic else "false"
+
     def build(self) -> StateGraph[ResearchState]:
         """Create a LangGraph graph."""
-        self._graph = _build_graph()
+        self._graph = _build_graph(enable_critic=self.enable_critic)
         return self._graph
 
     def run(self, state: ResearchState) -> ResearchState:

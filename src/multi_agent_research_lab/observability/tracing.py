@@ -1,4 +1,4 @@
-"""Tracing hooks with LangSmith/Langfuse integration.
+"""Tracing hooks with LangSmith integration.
 
 This module provides observability for the multi-agent workflow using LangSmith.
 Configure via environment variables:
@@ -7,6 +7,7 @@ Configure via environment variables:
 """
 
 import logging
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
@@ -17,12 +18,9 @@ from multi_agent_research_lab.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Global trace session
-_trace_session: dict[str, Any] = {
-    "session_id": None,
-    "spans": [],
-    "enabled": False,
-}
+# Global trace state
+_trace_enabled = False
+_langsmith_client = None
 
 
 def init_langsmith() -> bool:
@@ -30,21 +28,34 @@ def init_langsmith() -> bool:
 
     Returns True if LangSmith is enabled.
     """
+    global _trace_enabled, _langsmith_client
+
     settings = get_settings()
     if not settings.langsmith_api_key:
         logger.debug("LangSmith API key not configured - tracing disabled")
         return False
 
     try:
-        # LangGraph automatically picks up LANGSMITH_* env vars
-        import os
+        # Set environment variables for LangGraph/LangSmith
         os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
         os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
         os.environ["LANGSMITH_TRACING"] = "true"
 
+        # Try to import and initialize langsmith client
+        from langsmith import Client
+
+        _langsmith_client = Client(
+            api_url="https://api.smith.langchain.com",
+            api_key=settings.langsmith_api_key,
+        )
+
+        _trace_enabled = True
         logger.info(f"LangSmith tracing enabled: project={settings.langsmith_project}")
-        _trace_session["enabled"] = True
         return True
+
+    except ImportError:
+        logger.warning("langsmith package not installed - tracing disabled")
+        return False
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Failed to initialize LangSmith: {exc}")
         return False
@@ -57,41 +68,57 @@ def trace_span(name: str, attributes: dict[str, Any] | None = None) -> Iterator[
     When LangSmith is configured, traces are sent to LangSmith.
     Otherwise, traces are collected locally.
     """
+    global _trace_enabled, _langsmith_client
+
     started = _get_time()
     span_id = str(uuid4())[:8]
+    parent_id = _trace_span_context.get("current_run_id")
 
     span: dict[str, Any] = {
-        "span_id": span_id,
+        "id": span_id,
+        "parent_id": parent_id,
         "name": name,
         "attributes": attributes or {},
         "start_time": started,
+        "end_time": None,
         "duration_seconds": None,
         "events": [],
         "status": "ok",
+        "error": None,
     }
 
-    # Start LangSmith span if available
-    _start_langsmith_span(name, attributes)
+    # Start LangSmith span if enabled
+    if _trace_enabled and _langsmith_client:
+        _start_langsmith_span(span)
 
     try:
         yield span
     except Exception as exc:  # noqa: BLE001
         span["status"] = "error"
         span["error"] = str(exc)
-        _end_langsmith_span(name, span)
         raise
     finally:
-        span["duration_seconds"] = _get_time() - started
-        _end_langsmith_span(name, span)
+        span["end_time"] = _get_time()
+        span["duration_seconds"] = span["end_time"] - started
 
-        # Store locally if not using LangSmith
-        if not _trace_session["enabled"]:
-            _trace_session["spans"].append(span)
+        # End LangSmith span
+        if _trace_enabled and _langsmith_client:
+            _end_langsmith_span(span)
 
         logger.debug(
             f"[TRACE] {name} ({span_id}) - {span['duration_seconds']:.3f}s"
             + (f" [ERROR: {span.get('error')}]" if span.get("error") else "")
         )
+
+
+class _SpanContext:
+    """Context for nested spans."""
+    def __init__(self, span_id: str):
+        self.id = span_id
+
+
+# Thread-local storage for span context
+_trace_span_context: dict = {}
 
 
 def _get_time() -> float:
@@ -100,37 +127,37 @@ def _get_time() -> float:
     return time.perf_counter()
 
 
-def _start_langsmith_span(name: str, attributes: dict[str, Any] | None) -> None:
+def _start_langsmith_span(span: dict[str, Any]) -> None:
     """Start a LangSmith span."""
+    global _langsmith_client
+
     try:
         from langsmith.run_trees import RunTree
 
         settings = get_settings()
-        if not settings.langsmith_api_key:
-            return
-
-        # Create run tree for LangSmith
-        parent_run_id = _trace_session.get("parent_run_id")
 
         run = RunTree(
-            name=name,
+            name=span["name"],
             run_type="chain",
-            inputs=attributes or {},
+            inputs=span["attributes"],
             project_name=settings.langsmith_project,
-            parent_run_id=parent_run_id,
+            parent_run_id=span.get("parent_id"),
         )
-        _trace_session[f"run_{name}"] = run
+
+        # Store run reference and context
+        _trace_span_context["current"] = _SpanContext(span["id"])
+        _trace_span_context[f"run_{span['id']}"] = run
 
     except ImportError:
-        logger.debug("langsmith not installed - using local tracing only")
+        pass  # langsmith not installed
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"Failed to start LangSmith span: {exc}")
 
 
-def _end_langsmith_span(name: str, span: dict[str, Any]) -> None:
+def _end_langsmith_span(span: dict[str, Any]) -> None:
     """End a LangSmith span."""
     try:
-        run = _trace_session.pop(f"run_{name}", None)
+        run = _trace_span_context.pop(f"run_{span['id']}", None)
         if run:
             run.end(
                 outputs={
@@ -139,6 +166,10 @@ def _end_langsmith_span(name: str, span: dict[str, Any]) -> None:
                     "error": span.get("error"),
                 }
             )
+        # Clear context if this was the current span
+        current = _trace_span_context.get("current")
+        if current and current.id == span["id"]:
+            _trace_span_context.pop("current", None)
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"Failed to end LangSmith span: {exc}")
 
@@ -223,6 +254,11 @@ def get_traces() -> dict[str, Any]:
     collector = get_trace_collector()
     return {
         "local_traces": collector.get_summary(),
-        "langsmith_enabled": _trace_session["enabled"],
+        "langsmith_enabled": _trace_enabled,
         "langsmith_project": get_settings().langsmith_project,
     }
+
+
+def is_tracing_enabled() -> bool:
+    """Check if LangSmith tracing is enabled."""
+    return _trace_enabled

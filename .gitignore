@@ -10,4 +10,4 @@ build/
 *.egg-info/
 reports/*.json
 reports/*.md
-!.gitkeep
+!reports/.gitkeep

@@ -1,6 +1,7 @@
 """Benchmark skeleton for single-agent vs multi-agent."""
 
 import logging
+import re
 from collections.abc import Callable
 from time import perf_counter
 from typing import Any
@@ -14,7 +15,7 @@ Runner = Callable[[str], ResearchState]
 
 
 def run_benchmark(
-    run_name: str, query: str, runner: Runner
+    run_name: str, query: str, runner: Callable[[str], ResearchState]
 ) -> tuple[ResearchState, BenchmarkMetrics]:
     """Measure latency, cost, and quality metrics for a run.
 
@@ -66,6 +67,15 @@ def _calculate_total_cost(state: ResearchState) -> float | None:
         cost = result.metadata.get("cost_usd")
         if cost is not None:
             total += cost
+
+    # If no cost recorded but we have tokens, estimate
+    if total == 0.0 and state.agent_results:
+        for result in state.agent_results:
+            tokens = result.metadata.get("tokens")
+            if tokens:
+                # Rough estimate: $0.01 per 1K tokens
+                total += tokens * 0.00001
+
     return round(total, 6) if total > 0 else None
 
 
@@ -78,8 +88,6 @@ def _calculate_citation_coverage(state: ResearchState) -> float | None:
         return None
 
     # Count citation references like [1], [2], etc.
-    import re
-
     citations = set(re.findall(r"\[(\d+)\]", state.final_answer))
     total_sources = len(state.sources)
 
@@ -93,27 +101,33 @@ def _calculate_citation_coverage(state: ResearchState) -> float | None:
 def _estimate_quality_score(state: ResearchState) -> float | None:
     """Estimate quality score based on available metrics.
 
-    This is a heuristic; real quality assessment would use LLM-as-judge
-    or human evaluation.
+    This is a neutral heuristic that scores based on content completeness,
+    not favoring either baseline or multi-agent approach.
     """
+    if not state.final_answer:
+        return None
+
     score = 5.0  # Base score
 
-    # Boost for having all components
+    # Content length bonus (0-2 points)
+    answer_len = len(state.final_answer)
+    if answer_len > 500:
+        score += 1.0
+    if answer_len > 1000:
+        score += 0.5
+
+    # Citation bonus (0-2 points)
+    citations = set(re.findall(r"\[(\d+)\]", state.final_answer))
+    if citations:
+        score += min(len(citations) * 0.3, 2.0)
+
+    # Source diversity bonus (0-1 point)
     if state.sources:
-        score += 1.0
-    if state.research_notes:
-        score += 1.0
-    if state.analysis_notes:
-        score += 1.0
-    if state.final_answer and len(state.final_answer) > 200:
-        score += 1.0
+        score += 0.5
 
-    # Boost for citations
-    if state.final_answer:
-        import re
-
-        citations = len(set(re.findall(r"\[(\d+)\]", state.final_answer)))
-        score += min(citations * 0.2, 1.0)
+    # Structure bonus (0-1 point) - check for common structural elements
+    if any(marker in state.final_answer.lower() for marker in ['##', '###', '**', '- ', '* ']):
+        score += 0.5
 
     return round(min(score, 10.0), 1)
 

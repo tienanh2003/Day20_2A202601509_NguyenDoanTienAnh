@@ -1,6 +1,7 @@
 """Supervisor / router skeleton."""
 
 import logging
+import os
 
 from multi_agent_research_lab.agents.base import BaseAgent
 from multi_agent_research_lab.core.config import get_settings
@@ -27,7 +28,13 @@ class SupervisorAgent(BaseAgent):
         """Update `state.route_history` with the next route."""
         settings = get_settings()
         max_iter = settings.max_iterations
-        enable_critic = getattr(settings, "enable_critic", True)
+
+        # Check enable_critic from environment variable (set by workflow)
+        enable_critic_env = os.environ.get("ENABLE_CRITIC", "").lower()
+        if enable_critic_env:
+            enable_critic = enable_critic_env == "true"
+        else:
+            enable_critic = getattr(settings, "enable_critic", True)
 
         # Enforce max iterations
         if state.iteration >= max_iter:
@@ -67,6 +74,7 @@ class SupervisorAgent(BaseAgent):
                 "has_research_notes": bool(state.research_notes),
                 "has_analysis_notes": bool(state.analysis_notes),
                 "has_final_answer": bool(state.final_answer),
+                "enable_critic": enable_critic,
             },
         )
 
