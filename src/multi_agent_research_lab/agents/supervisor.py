@@ -1,22 +1,71 @@
 """Supervisor / router skeleton."""
 
+import logging
+
 from multi_agent_research_lab.agents.base import BaseAgent
-from multi_agent_research_lab.core.errors import StudentTodoError
+from multi_agent_research_lab.core.config import get_settings
+from multi_agent_research_lab.core.schemas import AgentName
 from multi_agent_research_lab.core.state import ResearchState
+
+logger = logging.getLogger(__name__)
 
 
 class SupervisorAgent(BaseAgent):
-    """Decides which worker should run next and when to stop."""
+    """Decides which worker should run next and when to stop.
+
+    Routing logic:
+    1. If no sources → route to researcher
+    2. If no analysis_notes → route to analyst
+    3. If no final_answer → route to writer
+    4. Otherwise → done
+    """
 
     name = "supervisor"
 
     def run(self, state: ResearchState) -> ResearchState:
-        """Update `state.route_history` with the next route.
+        """Update `state.route_history` with the next route."""
+        settings = get_settings()
+        max_iter = settings.max_iterations
 
-        TODO(student): Implement routing policy. Suggested steps:
-        - Inspect request, current notes, and missing fields.
-        - Choose one of: researcher, analyst, writer, done.
-        - Enforce max iterations and failure fallback.
-        """
+        # Enforce max iterations
+        if state.iteration >= max_iter:
+            logger.warning(
+                f"Max iterations ({max_iter}) reached. Forcing stop."
+            )
+            state.record_route("done")
+            state.add_trace_event(
+                "supervisor",
+                {"action": "stop", "reason": "max_iterations", "iteration": state.iteration},
+            )
+            return state
 
-        raise StudentTodoError("TODO(student): implement SupervisorAgent.run")
+        # Routing policy
+        if not state.sources:
+            next_route = AgentName.RESEARCHER
+        elif not state.research_notes:
+            next_route = AgentName.RESEARCHER  # Researcher also writes notes
+        elif not state.analysis_notes:
+            next_route = AgentName.ANALYST
+        elif not state.final_answer:
+            next_route = AgentName.WRITER
+        else:
+            next_route = "done"
+
+        state.record_route(next_route)
+        state.add_trace_event(
+            "supervisor",
+            {
+                "action": "route",
+                "next": next_route,
+                "iteration": state.iteration,
+                "has_sources": bool(state.sources),
+                "has_research_notes": bool(state.research_notes),
+                "has_analysis_notes": bool(state.analysis_notes),
+                "has_final_answer": bool(state.final_answer),
+            },
+        )
+
+        logger.info(
+            f"[Iter {state.iteration}] Supervisor routing to: {next_route}"
+        )
+        return state
